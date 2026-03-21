@@ -2,7 +2,7 @@
 
 ## 📌 Introduction
 
-This is the **official implementation** of [our paper](link):
+This is the **official implementation** of [our paper](https://arxiv.org/abs/2601.21925):
 
 ```bibtex
 Localizing Speech Deepfakes Beyond Transitions via Segment-Aware Learning
