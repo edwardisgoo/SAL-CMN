@@ -80,134 +80,89 @@ class SALTrainer(LightningModule):
         :return: The batch with mixup applied to selected samples
         """
         utt_ids, inputs, labels, label_lengths = batch
-        batch_size = inputs.size(0)
-        
-        
-        # Calculate how many samples to apply mixup to
-        num_mixup = int(batch_size * self.mixup_ratio)
-        
-        if num_mixup == 0:
-            # No mixup to apply
+        B = inputs.size(0)
+        if B == 0 or self.mixup_ratio <= 0:
             return batch
         
-        # Create a random permutation of the batch indices
-        perm_indices = torch.randperm(batch_size)
+        # Calculate how many samples to apply mixup to
+        num_mixup = int(B * self.mixup_ratio)
         
-        # Select the first num_mixup samples for mixup
-        mixup_indices = perm_indices[:num_mixup]
-        original_indices = perm_indices[num_mixup:]
+        if num_mixup <= 0:
+            # No mixup to apply
+            return batch
+
+        device = inputs.device
+        T = inputs.size(1)
+        Lmax = labels.size(1)
         
-        # Create shuffled versions for mixup samples
-        shuffled_inputs = inputs[mixup_indices]
-        shuffled_labels = labels[mixup_indices]
-        shuffled_label_lengths = label_lengths[mixup_indices]
+        # Choose which samples to mix and a shuffled partner order
+        perm = torch.randperm(B, device=device)
+        mix_idx = perm[:num_mixup]
+        keep_idx = perm[num_mixup:]
         
-        # Get sequence lengths for inputs and labels
-        seq_len = inputs.size(1)
-        max_label_len = labels.size(1)
+        partner_idx = torch.randperm(num_mixup, device=device)
+        src_idx = mix_idx
+        shuf_idx = mix_idx[partner_idx]
         
-        # Generate random cut points using uniform distribution
-        # Ensure cut points are within valid range (avoiding 0 and full length)
-        min_cut_ratio = 0.2  # Minimum 20% from start
-        max_cut_ratio = 0.8  # Maximum 80% from start
-        
-        # Uniform distribution for cut points
-        cut_ratios_input = torch.rand(num_mixup, device=inputs.device) * (max_cut_ratio - min_cut_ratio) + min_cut_ratio
-        cut_ratios_label = torch.rand(num_mixup, device=inputs.device) * (max_cut_ratio - min_cut_ratio) + min_cut_ratio
-        
-        # Alternative: Normal distribution (uncomment to use instead of uniform)
-        # mean_ratio = 0.5
-        # std_ratio = 0.15
-        # cut_ratios_input = torch.normal(mean_ratio, std_ratio, size=(num_mixup,), device=inputs.device)
-        # cut_ratios_label = torch.normal(mean_ratio, std_ratio, size=(num_mixup,), device=inputs.device)
-        # # Clamp to valid range
-        # cut_ratios_input = torch.clamp(cut_ratios_input, min_cut_ratio, max_cut_ratio)
-        # cut_ratios_label = torch.clamp(cut_ratios_label, min_cut_ratio, max_cut_ratio)
-        
-        # Calculate cut points for each sample in the batch
-        cut_points_input = (cut_ratios_input * seq_len).long()
-        cut_points_label = (cut_ratios_label * max_label_len).long()
-        
-        # Ensure cut points are at least 1 and at most seq_len-1
-        cut_points_input = torch.clamp(cut_points_input, 1, seq_len - 1)
-        cut_points_label = torch.clamp(cut_points_label, 1, max_label_len - 1)
-        
-        # Apply mixup to selected samples with individual cut points
-        mixed_inputs_list = []
-        mixed_labels_list = []
-        
+        # One ratio per sample, shared between input and label domain
+        min_r, max_r = 0.2, 0.8
+        ratios = torch.rand(num_mixup, device=device) * (max_r - min_r) + min_r
+    
+        # Per-sample true lengths
+        len_src_lbl = label_lengths[src_idx].clamp_min(1)
+        len_shf_lbl = label_lengths[shuf_idx].clamp_min(1)
+
+        # Cut indices from the same ratio
+        cut_inp = (ratios * T).long().clamp_(1, max(T - 1, 1))
+        # Label domain uses per-sample lengths
+        cut_lbl_src = (ratios * len_src_lbl.float()).long()
+        cut_lbl_shf = (ratios * len_shf_lbl.float()).long()
+        # Ensure 1..len-1
+        cut_lbl_src = torch.min(torch.max(cut_lbl_src, torch.ones_like(cut_lbl_src)), len_src_lbl - 1)
+        cut_lbl_shf = torch.min(torch.max(cut_lbl_shf, torch.ones_like(cut_lbl_shf)), len_shf_lbl - 1)
+
+        # Build mixed inputs (time-major concat)
+        mixed_inputs = torch.empty((num_mixup, T) + inputs.shape[2:], device=device, dtype=inputs.dtype)
         for i in range(num_mixup):
-            # Get cut points for this sample
-            cut_point_input = cut_points_input[i]
-            
-            # Get actual label lengths for both original and shuffled samples
-            orig_label_len = label_lengths[mixup_indices[i]]
-            shuffled_label_len = shuffled_label_lengths[i]
-            
-            # Calculate label cut point based on actual label length
-            cut_point_label = min(cut_points_label[i], orig_label_len, shuffled_label_len)
-            
-            # Ensure cut point is within valid range for labels
-            cut_point_label = max(1, min(cut_point_label, min(orig_label_len, shuffled_label_len) - 1))
-            
-            # Mix inputs (use the same cut point as labels to maintain alignment)
-            mixed_input = torch.cat([
-                inputs[mixup_indices[i], :cut_point_input],
-                shuffled_inputs[i, cut_point_input:]
-            ], dim=0)
-            mixed_inputs_list.append(mixed_input)
-            
-            # Mix labels based on actual label lengths
-            mixed_label = torch.cat([
-                labels[mixup_indices[i], :cut_point_label],
-                shuffled_labels[i, cut_point_label:]
-            ], dim=0)
-            mixed_labels_list.append(mixed_label)
-        
-        # Pad sequences to maintain batch dimensions
-        mixed_inputs = torch.stack(mixed_inputs_list)
-        mixed_labels = torch.stack(mixed_labels_list)
-        
-        # Update label lengths for mixed samples
-        mixed_label_lengths = torch.zeros_like(label_lengths[mixup_indices])
-        
+            si = src_idx[i].item()
+            pi = shuf_idx[i].item()
+            c = cut_inp[i].item()
+            mixed_inputs[i] = torch.cat([inputs[si, :c], inputs[pi, c:]], dim=0)
+
+        # Build mixed labels with aligned cut derived from same ratios
+        mixed_labels = torch.empty((num_mixup, Lmax), device=device, dtype=labels.dtype)
+        mixed_label_lengths = torch.empty((num_mixup,), device=device, dtype=label_lengths.dtype)
+
         for i in range(num_mixup):
-            # Get actual label lengths for both original and shuffled samples
-            orig_label_len = label_lengths[mixup_indices[i]]
-            shuffled_label_len = shuffled_label_lengths[i]
-            
-            # Calculate the new label length after mixing
-            # The mixed label length should be the sum of the two parts
-            cut_point_label = min(cut_points_label[i], orig_label_len, shuffled_label_len)
-            cut_point_label = max(1, min(cut_point_label, min(orig_label_len, shuffled_label_len) - 1))
-            
-            # First part: from original sample (up to cut point)
-            first_part_len = cut_point_label
-            # Second part: from shuffled sample (from cut point to its end)
-            second_part_len = shuffled_label_len - cut_point_label
-            
-            # Total mixed label length
-            mixed_label_lengths[i] = first_part_len + second_part_len
-            
-            # Ensure it doesn't exceed the maximum label length
-            mixed_label_lengths[i] = min(mixed_label_lengths[i], max_label_len)
-        
-        # Combine mixed samples with original samples
-        final_inputs = torch.zeros_like(inputs)
-        final_labels = torch.zeros_like(labels)
-        final_label_lengths = torch.zeros_like(label_lengths)
-        
-        # Place mixed samples back in their original positions
-        final_inputs[mixup_indices] = mixed_inputs
-        final_labels[mixup_indices] = mixed_labels
-        final_label_lengths[mixup_indices] = mixed_label_lengths
-        
-        # Keep original samples for the rest
-        if len(original_indices) > 0:
-            final_inputs[original_indices] = inputs[original_indices]
-            final_labels[original_indices] = labels[original_indices]
-            final_label_lengths[original_indices] = label_lengths[original_indices]
-        
+            si = src_idx[i].item()
+            pi = shuf_idx[i].item()
+            # Use source cut translated to label domain (already computed as cut_lbl_src)
+            c_src = cut_lbl_src[i].item()
+            # From partner, continue from its own aligned cut
+            c_shf = cut_lbl_shf[i].item()
+
+            # Concat: [src up to its cut] + [partner from its cut onward]
+            left = labels[si, :c_src]
+            right = labels[pi, c_shf:]
+            lbl = torch.cat([left, right], dim=0)
+
+            # Trim/pad to Lmax to keep batch shape
+            new_len = min(lbl.size(0), Lmax)
+            mixed_label_lengths[i] = new_len
+            if lbl.size(0) < Lmax:
+                mixed_labels[i] = torch.cat([lbl, labels.new_zeros(Lmax - lbl.size(0))], dim=0)
+            else:
+                mixed_labels[i] = lbl[:Lmax]
+
+        # Stitch back into the batch
+        final_inputs = inputs.clone()
+        final_labels = labels.clone()
+        final_label_lengths = label_lengths.clone()
+
+        final_inputs[mix_idx] = mixed_inputs
+        final_labels[mix_idx] = mixed_labels
+        final_label_lengths[mix_idx] = mixed_label_lengths
+
         return utt_ids, final_inputs, final_labels, final_label_lengths
 
     def _get_label_mask(
@@ -425,7 +380,7 @@ class SALTrainer(LightningModule):
             # Handle batch data
             target_list = []
             for i, target_seq in enumerate(target_batch):
-                target_tensor = torch.tensor(target_seq, device=preds1.device).squeeze()
+                target_tensor = torch.tensor(target_seq, device=preds1.device).reshape(-1)
                 target_list.append(target_tensor)
             target = torch.cat(target_list, dim=0).type(torch.long)
         else:

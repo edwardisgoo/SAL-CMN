@@ -20,7 +20,7 @@ net:
   _target_: src.models.net.model.SSL_SeqModel_2Labels_2Loss
   ssl_encoder: xlsr
   mode: s3prl_weighted
-  ckpt: /exp/yuchen.mao/xlsr2_300m.pt
+  ckpt: /data/leafexe/CFPRF/pretrain_models/xlsr2_300m.converted.pt
   hid_dim: 1024
   seq_model: cf
   resolution_train: 0.16

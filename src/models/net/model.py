@@ -86,6 +86,7 @@ class BaseSSLModel(nn.Module):
         pool_head_num: int = 1,
         num_outputs: int = 2,
         create_out_layer: bool = True,
+        cmn: bool = False,
         **kwargs
     ):
         super(BaseSSLModel, self).__init__()
@@ -96,6 +97,7 @@ class BaseSSLModel(nn.Module):
         )
         self.hid_dim = self.ssl_encoder.out_dim
         self.pool_head_num = pool_head_num
+        self.cmn = cmn
         
         # Pooling head
         self.pool_head = PoolHead(
@@ -129,6 +131,9 @@ class BaseSSLModel(nn.Module):
             out = torch.stack(out, dim=0)
             out = out * self.weight_layer.view(25, 1, 1, 1)
             out = out.sum(dim=0)
+        
+        if self.cmn:
+            out = out - out.mean(dim=1, keepdim=True)
         
         return out
 

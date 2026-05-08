@@ -18,12 +18,12 @@ class Wav2vec2(nn.Module):
         if self.mode == "s3prl":
             if ckpt is None:
                 raise ValueError("Please provide a valid checkpoint.")
-            self.ssl_encoder = hub.wav2vec2_local(ckpt=ckpt, fairseq=True)
+            self.ssl_encoder = hub.wav2vec2_local(ckpt=ckpt, fairseq=False)
             self.out_dim = hid_dim
         elif self.mode == "s3prl_weighted":
             if ckpt is None:
                 raise ValueError("Please provide a valid checkpoint.")
-            self.ssl_encoder = hub.wav2vec2_local(ckpt=ckpt, fairseq=True)
+            self.ssl_encoder = hub.wav2vec2_local(ckpt=ckpt, fairseq=False)
             self.out_dim = hid_dim
         else:
             raise ValueError(f"Unsupported mode: {mode}")

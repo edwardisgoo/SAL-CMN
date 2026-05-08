@@ -1,5 +1,5 @@
 _target_: src.data.partialspoof.PartialSpoofDataModule
-root: /data/import/deepfake/PartialSpoof
+root: /data/leafexe/SAL/PartialSpoof/database
 sample_rate: 16000
 resolution_train: 0.16
 resolution_test: 0.16

@@ -222,9 +222,9 @@ def process_label():
     """
     resolutions = [0.02, 0.04, 0.08, 0.16, 0.32, 0.64]
     labels = [dict() for _ in resolutions]
-    root = '/data/import/deepfake/LlamaPartialSpoof/'
+    root = '/data/leafexe/LlamaPS/'
     txts = ['label_R01TTS.0.a.txt', 'label_R01TTS.0.b.txt']
-    out_dir = '/data/import/deepfake/LlamaPartialSpoof/segment_labels'
+    out_dir = '/data/leafexe/LlamaPS/segment_labels'
     for txt in txts:
         txt = root + txt
         with open(txt, 'r') as f:
@@ -282,10 +282,10 @@ def process_label():
 
 
 if __name__ == '__main__':
-    # process_label()
+    process_label()
     print("Loading LlamaPartialSpoofDataModule...")
     data_module = LlamaPartialSpoofDataModule(
-        root='/data/import/deepfake/LlamaPartialSpoof',
+        root='/data/leafexe/LlamaPS',
         part='cf',
         sample_rate=16000,
         resolution_train=0.02,
