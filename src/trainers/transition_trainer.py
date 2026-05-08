@@ -70,16 +70,9 @@ class TransitionTrainer(LightningModule):
             labels: torch.Tensor,
             label_lengths: torch.Tensor
     ) -> torch.Tensor:
-        """Get a mask for the labels based on their lengths.
-
-        :param labels: A tensor of labels.
-        :param label_lengths: A tensor of label lengths.
-        :return: A mask tensor where 1 indicates valid positions and 0 indicates
-            padded positions.
-        """
-        mask = torch.ones_like(labels, dtype=torch.bool)
-        for i, length in enumerate(label_lengths):
-            mask[i, length:] = False
+        B, L = labels.shape[:2]
+        ar = torch.arange(L, device=labels.device).unsqueeze(0)
+        mask = ar < label_lengths.view(-1, 1)
         return mask
 
     def _get_pred_label(

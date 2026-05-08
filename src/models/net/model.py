@@ -53,7 +53,7 @@ class PoolHead(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through pooling head."""
+        """Forward pass through pooling head with reshape guard for attention mode."""
         scale = self.scale_train if self.training else self.scale_test
 
         if self.pool == 'avg':
@@ -61,11 +61,20 @@ class PoolHead(nn.Module):
             x = F.avg_pool1d(x, kernel_size=scale, stride=scale)
             x = x.transpose(1, 2)
         else:
-            # attention pooling
+            # attention pooling expects groups of `scale` along time
             b, f, d = x.shape
-            x = x.reshape(-1, scale, d)
+            if scale <= 0:
+                raise ValueError(f"Invalid scale={scale}")
+            rem = f % scale
+            if rem != 0:
+                pad = scale - rem
+                pad_frame = x[:, -1:, :].expand(b, pad, d)
+                x = torch.cat([x, pad_frame], dim=1)
+                f = x.shape[1]
+            n_groups = f // scale
+            x = x.view(b * n_groups, scale, d)
             x = self.att_pool(x)
-            x = x.reshape(b, -1, d * self.att_pool.num_head)
+            x = x.view(b, n_groups, d * self.att_pool.num_head)
         return x
 
 

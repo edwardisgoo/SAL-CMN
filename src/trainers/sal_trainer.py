@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 from src.evaluator.evaluator import EERMetric, F1Metric, EERMetricWithLabel, F1MetricWithLabel
 from src.models.criterion.basic_loss import MaskedMultiClassCrossEntropyLoss
+from src.utils import mixup
 from src.trainers.label_generators import SPLLabelGenerator, TransitionLabelGenerator
 
 class SALTrainer(LightningModule):
@@ -71,115 +72,17 @@ class SALTrainer(LightningModule):
             self,
             batch: Tuple[list, torch.Tensor, torch.Tensor, torch.Tensor]
     ) -> Tuple[list, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Apply mixup data augmentation to a batch.
-        
-        Randomly selects a portion of the batch (based on mixup_ratio) and applies mixup
-        by shuffling and concatenating from random cut points using probability distributions.
-        
-        :param batch: A batch of data containing (utt_ids, inputs, labels, label_lengths)
-        :return: The batch with mixup applied to selected samples
-        """
-        utt_ids, inputs, labels, label_lengths = batch
-        B = inputs.size(0)
-        if B == 0 or self.mixup_ratio <= 0:
-            return batch
-        
-        # Calculate how many samples to apply mixup to
-        num_mixup = int(B * self.mixup_ratio)
-        
-        if num_mixup <= 0:
-            # No mixup to apply
-            return batch
-
-        device = inputs.device
-        T = inputs.size(1)
-        Lmax = labels.size(1)
-        
-        # Choose which samples to mix and a shuffled partner order
-        perm = torch.randperm(B, device=device)
-        mix_idx = perm[:num_mixup]
-        keep_idx = perm[num_mixup:]
-        
-        partner_idx = torch.randperm(num_mixup, device=device)
-        src_idx = mix_idx
-        shuf_idx = mix_idx[partner_idx]
-        
-        # One ratio per sample, shared between input and label domain
-        min_r, max_r = 0.2, 0.8
-        ratios = torch.rand(num_mixup, device=device) * (max_r - min_r) + min_r
-    
-        # Per-sample true lengths
-        len_src_lbl = label_lengths[src_idx].clamp_min(1)
-        len_shf_lbl = label_lengths[shuf_idx].clamp_min(1)
-
-        # Cut indices from the same ratio
-        cut_inp = (ratios * T).long().clamp_(1, max(T - 1, 1))
-        # Label domain uses per-sample lengths
-        cut_lbl_src = (ratios * len_src_lbl.float()).long()
-        cut_lbl_shf = (ratios * len_shf_lbl.float()).long()
-        # Ensure 1..len-1
-        cut_lbl_src = torch.min(torch.max(cut_lbl_src, torch.ones_like(cut_lbl_src)), len_src_lbl - 1)
-        cut_lbl_shf = torch.min(torch.max(cut_lbl_shf, torch.ones_like(cut_lbl_shf)), len_shf_lbl - 1)
-
-        # Build mixed inputs (time-major concat)
-        mixed_inputs = torch.empty((num_mixup, T) + inputs.shape[2:], device=device, dtype=inputs.dtype)
-        for i in range(num_mixup):
-            si = src_idx[i].item()
-            pi = shuf_idx[i].item()
-            c = cut_inp[i].item()
-            mixed_inputs[i] = torch.cat([inputs[si, :c], inputs[pi, c:]], dim=0)
-
-        # Build mixed labels with aligned cut derived from same ratios
-        mixed_labels = torch.empty((num_mixup, Lmax), device=device, dtype=labels.dtype)
-        mixed_label_lengths = torch.empty((num_mixup,), device=device, dtype=label_lengths.dtype)
-
-        for i in range(num_mixup):
-            si = src_idx[i].item()
-            pi = shuf_idx[i].item()
-            # Use source cut translated to label domain (already computed as cut_lbl_src)
-            c_src = cut_lbl_src[i].item()
-            # From partner, continue from its own aligned cut
-            c_shf = cut_lbl_shf[i].item()
-
-            # Concat: [src up to its cut] + [partner from its cut onward]
-            left = labels[si, :c_src]
-            right = labels[pi, c_shf:]
-            lbl = torch.cat([left, right], dim=0)
-
-            # Trim/pad to Lmax to keep batch shape
-            new_len = min(lbl.size(0), Lmax)
-            mixed_label_lengths[i] = new_len
-            if lbl.size(0) < Lmax:
-                mixed_labels[i] = torch.cat([lbl, labels.new_zeros(Lmax - lbl.size(0))], dim=0)
-            else:
-                mixed_labels[i] = lbl[:Lmax]
-
-        # Stitch back into the batch
-        final_inputs = inputs.clone()
-        final_labels = labels.clone()
-        final_label_lengths = label_lengths.clone()
-
-        final_inputs[mix_idx] = mixed_inputs
-        final_labels[mix_idx] = mixed_labels
-        final_label_lengths[mix_idx] = mixed_label_lengths
-
-        return utt_ids, final_inputs, final_labels, final_label_lengths
+        return mixup.mixup_batch(batch, mixup_ratio=self.mixup_ratio, cut_min=0.2, cut_max=0.8)
 
     def _get_label_mask(
             self,
             labels: torch.Tensor,
             label_lengths: torch.Tensor
     ) -> torch.Tensor:
-        """Get a mask for the labels based on their lengths.
-
-        :param labels: A tensor of labels.
-        :param label_lengths: A tensor of label lengths.
-        :return: A mask tensor where 1 indicates valid positions and 0 indicates
-            padded positions.
-        """
-        mask = torch.ones_like(labels, dtype=torch.bool)
-        for i, length in enumerate(label_lengths):
-            mask[i, length:] = False
+        """Vectorized mask: True for valid positions, False for padding."""
+        B, L = labels.shape[:2]
+        ar = torch.arange(L, device=labels.device).unsqueeze(0)
+        mask = ar < label_lengths.view(-1, 1)
         return mask
 
     def _get_pred_label(
