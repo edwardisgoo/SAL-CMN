@@ -13,10 +13,14 @@ class MaskedCrossEntropyLoss(nn.Module):
         loss = self.criterion(input, target)
         # print(input.shape, target.shape, loss.shape) (batch_size, num_classes, seq_len), (batch_size, seq_len), (batch_size, seq_len)
         if mask is not None:
-            loss = loss * mask
-            loss = loss.sum() / mask.sum()
+            # Guard against empty masks (no valid timesteps). Fallback to mean over all positions.
+            mask_sum = mask.sum()
+            if mask_sum.item() == 0:
+                loss = loss.mean()
+            else:
+                loss = (loss * mask).sum() / mask_sum
         else:
-            loss = loss.sum() / loss.numel()
+            loss = loss.mean()
         return loss
 
 
@@ -51,10 +55,13 @@ class MaskedMultiClassCrossEntropyLoss(nn.Module):
         loss = self.criterion(input, target)
 
         if mask is not None:
-            loss = loss * mask
-            loss = loss.sum() / mask.sum()
+            mask_sum = mask.sum()
+            if mask_sum.item() == 0:
+                # No valid positions in this batch; avoid div-by-zero and use mean
+                return loss.mean()
+            loss = (loss * mask).sum() / mask_sum
         else:
-            loss = loss.sum() / loss.numel()
+            loss = loss.mean()
         return loss
 
 
