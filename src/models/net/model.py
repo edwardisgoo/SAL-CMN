@@ -135,6 +135,15 @@ class BaseSSLModel(nn.Module):
         """Extract SSL features with optional weighted combination."""
         x = F.pad(x, (0, 256), mode='constant', value=0)
         out = self.ssl_encoder.extract_feat(x)
+
+        # Guard: ensure encoder outputs are finite
+        if isinstance(out, list):
+            for i, t in enumerate(out):
+                if not torch.isfinite(t).all():
+                    raise RuntimeError(f"SSL encoder produced non-finite features at layer {i}")
+        else:
+            if not torch.isfinite(out).all():
+                raise RuntimeError("SSL encoder produced non-finite features")
         
         if hasattr(self, "weight_layer"):
             out = torch.stack(out, dim=0)

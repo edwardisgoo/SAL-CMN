@@ -127,16 +127,30 @@ class PartialSpoofDataset(BaseDataset):
                 # Apply RawBoost augmentation
                 audio_aug = process_Rawboost_feat(audio_np, sr, self.augmentation_algo)
                 
-                # Convert back to original format
-                if isinstance(audio, torch.Tensor):
-                    audio = torch.from_numpy(audio_aug).float()
+                # Guard: ensure finite after augmentation
+                if not np.isfinite(audio_aug).all():
+                    print(f"RawBoost produced non-finite samples for {path}; skipping augmentation")
                 else:
-                    audio = audio_aug
+                    # Convert back to original format
+                    if isinstance(audio, torch.Tensor):
+                        audio = torch.from_numpy(audio_aug).float()
+                    else:
+                        audio = audio_aug
                     
             except Exception as e:
                 # If augmentation fails, keep original audio
                 print(f"Data augmentation failed for {path}: {e}")
                 pass
+        
+        # Guard: ensure finite audio before returning
+        if isinstance(audio, torch.Tensor):
+            if not torch.isfinite(audio).all():
+                audio = torch.where(torch.isfinite(audio), audio, torch.zeros_like(audio))
+                print(f"Warning: non-finite audio detected in {path}; replaced with zeros")
+        else:
+            if not np.isfinite(audio).all():
+                audio = np.nan_to_num(audio, copy=False)
+                print(f"Warning: non-finite audio detected in {path}; replaced with zeros")
         
         return audio
 

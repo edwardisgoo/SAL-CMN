@@ -1,0 +1,173 @@
+diff --git a/src/data/partialspoof.py b/src/data/partialspoof.py
+index 8071777..df9c814 100644
+--- a/src/data/partialspoof.py
++++ b/src/data/partialspoof.py
+@@ -127,17 +127,31 @@ class PartialSpoofDataset(BaseDataset):
+                 # Apply RawBoost augmentation
+                 audio_aug = process_Rawboost_feat(audio_np, sr, self.augmentation_algo)
+                 
+-                # Convert back to original format
+-                if isinstance(audio, torch.Tensor):
+-                    audio = torch.from_numpy(audio_aug).float()
++                # Guard: ensure finite after augmentation
++                if not np.isfinite(audio_aug).all():
++                    print(f"RawBoost produced non-finite samples for {path}; skipping augmentation")
+                 else:
+-                    audio = audio_aug
++                    # Convert back to original format
++                    if isinstance(audio, torch.Tensor):
++                        audio = torch.from_numpy(audio_aug).float()
++                    else:
++                        audio = audio_aug
+                     
+             except Exception as e:
+                 # If augmentation fails, keep original audio
+                 print(f"Data augmentation failed for {path}: {e}")
+                 pass
+         
++        # Guard: ensure finite audio before returning
++        if isinstance(audio, torch.Tensor):
++            if not torch.isfinite(audio).all():
++                audio = torch.where(torch.isfinite(audio), audio, torch.zeros_like(audio))
++                print(f"Warning: non-finite audio detected in {path}; replaced with zeros")
++        else:
++            if not np.isfinite(audio).all():
++                audio = np.nan_to_num(audio, copy=False)
++                print(f"Warning: non-finite audio detected in {path}; replaced with zeros")
++        
+         return audio
+ 
+     def label_load_fn(self):
+diff --git a/src/models/net/model.py b/src/models/net/model.py
+index 2b4ddf1..2c3eda1 100644
+--- a/src/models/net/model.py
++++ b/src/models/net/model.py
+@@ -135,6 +135,15 @@ class BaseSSLModel(nn.Module):
+         """Extract SSL features with optional weighted combination."""
+         x = F.pad(x, (0, 256), mode='constant', value=0)
+         out = self.ssl_encoder.extract_feat(x)
++
++        # Guard: ensure encoder outputs are finite
++        if isinstance(out, list):
++            for i, t in enumerate(out):
++                if not torch.isfinite(t).all():
++                    raise RuntimeError(f"SSL encoder produced non-finite features at layer {i}")
++        else:
++            if not torch.isfinite(out).all():
++                raise RuntimeError("SSL encoder produced non-finite features")
+         
+         if hasattr(self, "weight_layer"):
+             out = torch.stack(out, dim=0)
+diff --git a/src/trainers/sal_trainer.py b/src/trainers/sal_trainer.py
+index 1e4b8ad..9e24cec 100644
+--- a/src/trainers/sal_trainer.py
++++ b/src/trainers/sal_trainer.py
+@@ -119,6 +119,20 @@ class SALTrainer(LightningModule):
+             log_dir = self.logger.log_dir
+             return str.join("/", log_dir.split("/")[:-2])
+ 
++    def _log_warn(self, msg: str) -> None:
++        """Print and also append a warning line to exp_dir/nan_warnings.log."""
++        try:
++            print(msg, flush=True)
++        except Exception:
++            pass
++        try:
++            exp_dir = self.exp_dir
++            os.makedirs(exp_dir, exist_ok=True)
++            with open(os.path.join(exp_dir, "nan_warnings.log"), "a") as f:
++                f.write(msg + "\n")
++        except Exception:
++            pass
++
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         """Perform a forward pass through the model `self.net`.
+ 
+@@ -150,13 +164,50 @@ class SALTrainer(LightningModule):
+         # Apply mixup if enabled
+         if self.mixup:
+             batch = self._mixup_batch(batch)
+-            # batch = self._mixup_batch(batch)
+         if self.mixup2:
+             batch = self._mixup_batch(batch)
+             batch = self._mixup_batch(batch)
+         utt_ids, inputs, labels, label_lengths = batch
++
++        # Guard 1: check inputs for NaN/Inf prior to forward
++        if not torch.isfinite(inputs).all():
++            flat = inputs.view(inputs.size(0), -1)
++            bad = ~torch.isfinite(flat).all(dim=1)
++            bad_ids = [utt_ids[i] for i in torch.nonzero(bad, as_tuple=False).squeeze(-1).tolist()]
++            self._log_warn(f"WARN[NAN] inputs epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={bad_ids[:16]}")
++            # Drop bad samples from the batch
++            keep = ~bad
++            inputs = inputs[keep]
++            labels = labels[keep]
++            label_lengths = label_lengths[keep]
++            utt_ids = [u for k, u in zip(keep.tolist(), utt_ids) if k]
++            if inputs.numel() == 0 or inputs.size(0) == 0:
++                return torch.tensor(0.0, device=self.device, requires_grad=True)
++
+         preds1, preds2 = self.forward(inputs)
++
++        # Guard 2: check preds for NaN/Inf
++        any_bad = False
++        for p, tag in ((preds1, 'preds1'), (preds2, 'preds2')):
++            if not torch.isfinite(p).all():
++                flat = p.view(p.size(0), -1)
++                bad = ~torch.isfinite(flat).all(dim=1)
++                bad_ids = [utt_ids[i] for i in torch.nonzero(bad, as_tuple=False).squeeze(-1).tolist()]
++                self._log_warn(f"WARN[NAN] {tag} epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={bad_ids[:16]}")
++                # Drop bad samples
++                keep = ~bad
++                preds1 = preds1[keep]
++                preds2 = preds2[keep]
++                labels = labels[keep]
++                label_lengths = label_lengths[keep]
++                utt_ids = [u for k, u in zip(keep.tolist(), utt_ids) if k]
++                any_bad = True
++                if preds1.size(0) == 0:
++                    return torch.tensor(0.0, device=self.device, requires_grad=True)
++        
+         mask = self._get_label_mask(labels, label_lengths)
++        if mask.sum().item() == 0:
++            self._log_warn(f"WARN[EMPTY_MASK] epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={utt_ids[:16]}")
+         
+         # Generate boundary labels for batch
+         labels_info, lengths_info = SPLLabelGenerator._seg2bd_label_new(labels)
+@@ -164,14 +215,12 @@ class SALTrainer(LightningModule):
+         
+         # Convert batch targets to tensor format
+         if isinstance(target_batch, list):
+-            # Handle batch data
+             target_list = []
+             for i, target_seq in enumerate(target_batch):
+                 target_tensor = torch.tensor(target_seq, device=preds1.device).squeeze()
+                 target_list.append(target_tensor)
+             target = torch.cat(target_list, dim=0).type(torch.long)
+         else:
+-            # Handle single sequence
+             target = torch.tensor(target_batch, device=preds1.device).view(-1).type(torch.long)
+         
+         loss1 = self.criterion(preds1.transpose(1, 2),
+@@ -179,6 +228,12 @@ class SALTrainer(LightningModule):
+         loss2 = self.criterion2(preds2,
+                              labels.to(torch.long), mask=mask)
+         loss = loss1 + self.v2 * loss2
++
++        # Guard 3: ensure finite loss
++        if not torch.isfinite(loss):
++            self._log_warn(f"WARN[NAN_LOSS] epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={utt_ids[:16]}")
++            return torch.tensor(0.0, device=self.device, requires_grad=True)
++
+         # update and log metrics
+         self.train_loss(loss)
+         self.log("train/loss", self.train_loss, on_step=True,
+@@ -187,7 +242,6 @@ class SALTrainer(LightningModule):
+         self.log("train/lr", lr, on_step=True, on_epoch=True,
+                  sync_dist=True)
+ 
+-        # return loss or backpropagation will fail
+         return loss
+ 
+     def on_train_epoch_end(self) -> None:
