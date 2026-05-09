@@ -142,8 +142,12 @@ class BaseSSLModel(nn.Module):
                 if not torch.isfinite(t).all():
                     raise RuntimeError(f"SSL encoder produced non-finite features at layer {i}")
         else:
-            if not torch.isfinite(out).all():
-                raise RuntimeError("SSL encoder produced non-finite features")
+            if isinstance(out, (list, tuple)):
+                if not all(torch.isfinite(t).all() for t in out):
+                    raise RuntimeError("SSL encoder produced non-finite features")
+            else:
+                if not torch.isfinite(out).all():
+                    raise RuntimeError("SSL encoder produced non-finite features")
         
         if hasattr(self, "weight_layer"):
             out = torch.stack(out, dim=0)
