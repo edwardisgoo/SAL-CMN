@@ -137,18 +137,22 @@ class BaseSSLModel(nn.Module):
         out = self.ssl_encoder.extract_feat(x)
 
         # Guard: ensure encoder outputs are finite
-        if isinstance(out, list):
+        # Guard: replace non-finite SSL features with zeros
+        def _sanitize(t: torch.Tensor) -> torch.Tensor:
+            return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if isinstance(out, (list, tuple)):
+            new_out = []
             for i, t in enumerate(out):
                 if not torch.isfinite(t).all():
-                    raise RuntimeError(f"SSL encoder produced non-finite features at layer {i}")
+                    print(f"WARN[NAN] SSL encoder non-finite features at layer {i}; replaced with zeros", flush=True)
+                    t = _sanitize(t)
+                new_out.append(t)
+            out = new_out
         else:
-            if isinstance(out, (list, tuple)):
-                if not all(torch.isfinite(t).all() for t in out):
-                    raise RuntimeError("SSL encoder produced non-finite features")
-            else:
-                if not torch.isfinite(out).all():
-                    raise RuntimeError("SSL encoder produced non-finite features")
-        
+            if not torch.isfinite(out).all():
+                print("WARN[NAN] SSL encoder non-finite features; replaced with zeros", flush=True)
+                out = _sanitize(out)
         if hasattr(self, "weight_layer"):
             out = torch.stack(out, dim=0)
             out = out * self.weight_layer.view(25, 1, 1, 1)
