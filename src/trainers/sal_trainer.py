@@ -195,7 +195,6 @@ class SALTrainer(LightningModule):
             wl = getattr(self.net, "weight_layer", None)
             if wl is not None and torch.isfinite(wl).all():
                 self._last_good_weight_layer = wl.detach().clone()
-                setattr(self.net, "_trainer_ref", self)
         except Exception:
             pass
 

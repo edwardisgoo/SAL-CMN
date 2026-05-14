@@ -158,17 +158,6 @@ class BaseSSLModel(nn.Module):
                 out = _sanitize(out)
                 nan_flag = True
         if hasattr(self, "weight_layer"):
-            # ADD THIS BLOCK
-            if not torch.isfinite(self.weight_layer).all():
-                try:
-                    if hasattr(self, "_trainer_ref") and getattr(self, "_trainer_ref") is not None:
-                        snap = getattr(self._trainer_ref, "_last_good_weight_layer", None)
-                        if snap is not None and snap.shape == self.weight_layer.shape:
-                            with torch.no_grad():
-                                self.weight_layer.copy_(snap)
-                            print("WARN[NAN] weight_layer contained NaN; restored last good weights", flush=True)
-                except Exception:
-                    pass
             out = torch.stack(out, dim=0)
             out = out * self.weight_layer.view(25, 1, 1, 1)
             out = out.sum(dim=0)

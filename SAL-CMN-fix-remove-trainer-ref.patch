@@ -1,0 +1,35 @@
+diff --git a/src/models/net/model.py b/src/models/net/model.py
+index dd6b045..986fdfc 100644
+--- a/src/models/net/model.py
++++ b/src/models/net/model.py
+@@ -152,18 +152,6 @@ class BaseSSLModel(nn.Module):
+                 nan_flag = True
+         
+         if hasattr(self, "weight_layer"):
+-            # If weight_layer is poisoned, restore from last good snapshot if present
+-            if not torch.isfinite(self.weight_layer).all():
+-                try:
+-                    # restore from trainer snapshot if available
+-                    if hasattr(self, "_trainer_ref") and getattr(self, "_trainer_ref") is not None:
+-                        snap = getattr(self._trainer_ref, "_last_good_weight_layer", None)
+-                        if snap is not None and snap.shape == self.weight_layer.shape:
+-                            with torch.no_grad():
+-                                self.weight_layer.copy_(snap)
+-                            print("WARN[NAN] weight_layer contained NaN; restored last good weights", flush=True)
+-                except Exception:
+-                    pass
+             out = torch.stack(out, dim=0)
+             out = out * self.weight_layer.view(25, 1, 1, 1)
+             out = out.sum(dim=0)
+diff --git a/src/trainers/sal_trainer.py b/src/trainers/sal_trainer.py
+index 9b21180..e824bd1 100644
+--- a/src/trainers/sal_trainer.py
++++ b/src/trainers/sal_trainer.py
+@@ -198,7 +198,6 @@ class SALTrainer(LightningModule):
+             wl = getattr(self.net, "weight_layer", None)
+             if wl is not None and torch.isfinite(wl).all():
+                 self._last_good_weight_layer = wl.detach().clone()
+-                setattr(self.net, "_trainer_ref", self)
+         except Exception:
+             pass
+ 
