@@ -1,0 +1,101 @@
+diff --git a/src/data/base_dataset.py b/src/data/base_dataset.py
+index bbbf9ac..ae7f792 100644
+--- a/src/data/base_dataset.py
++++ b/src/data/base_dataset.py
+@@ -47,6 +47,18 @@ class BaseDataset(Dataset):
+         else:
+             raise AttributeError(f'{root} root is not a list or str, {root}')
+ 
++        # Optional blacklist filtering via env SAL_BLACKLIST_PATH (list of utt_ids per line)
++        bl_path = os.environ.get("SAL_BLACKLIST_PATH", None)
++        if bl_path:
++            try:
++                with open(bl_path, "r") as f:
++                    bad_ids = set([line.strip() for line in f if line.strip()])
++                before = len(sample_list)
++                sample_list = [p for p in sample_list if os.path.splitext(os.path.basename(p))[0] not in bad_ids]
++                print(f"Blacklist filtered: {before} -> {len(sample_list)}")
++            except Exception as e:
++                print(f"Failed to read blacklist at {bl_path}: {e}")
++
+         # filter by min length
+         if min_input_len is not None:
+             sample_length = [self.input_load_fn(f).shape[-1] for f in
+diff --git a/src/trainers/sal_trainer.py b/src/trainers/sal_trainer.py
+index 8c4bc1a..0dcd136 100644
+--- a/src/trainers/sal_trainer.py
++++ b/src/trainers/sal_trainer.py
+@@ -180,6 +180,9 @@ class SALTrainer(LightningModule):
+             bad = ~torch.isfinite(flat).all(dim=1)
+             bad_ids = [utt_ids[i] for i in torch.nonzero(bad, as_tuple=False).squeeze(-1).tolist()]
+             self._log_warn(f"WARN[NAN] inputs epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={bad_ids[:16]}")
++            # Flag to skip optimizer step for this batch
++            self._skip_optimizer_step = True
++            self._last_bad_utt_ids = bad_ids
+             # Drop bad samples from the batch
+             keep = ~bad
+             inputs = inputs[keep]
+@@ -206,6 +209,9 @@ class SALTrainer(LightningModule):
+                 bad = ~torch.isfinite(flat).all(dim=1)
+                 bad_ids = [utt_ids[i] for i in torch.nonzero(bad, as_tuple=False).squeeze(-1).tolist()]
+                 self._log_warn(f"WARN[NAN] {tag} epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={bad_ids[:16]}")
++                # Flag to skip optimizer step for this batch
++                self._skip_optimizer_step = True
++                self._last_bad_utt_ids = bad_ids
+                 # Drop bad samples
+                 keep = ~bad
+                 preds1 = preds1[keep]
+@@ -244,6 +250,9 @@ class SALTrainer(LightningModule):
+         # Guard 3: ensure finite loss
+         if not torch.isfinite(loss):
+             self._log_warn(f"WARN[NAN_LOSS] epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} step={getattr(self, 'global_step', -1)} ids={utt_ids[:16]}")
++            # Flag to skip optimizer step for this batch
++            self._skip_optimizer_step = True
++            self._last_bad_utt_ids = utt_ids
+             return torch.tensor(0.0, device=self.device, requires_grad=True)
+ 
+         # update and log metrics
+@@ -256,6 +265,43 @@ class SALTrainer(LightningModule):
+ 
+         return loss
+ 
++
++    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
++        """Skip optimizer.step for flagged bad batches and non-finite grads."""
++        # Run closure to compute gradients if required
++        loss = None
++        if optimizer_closure is not None:
++            loss = optimizer_closure()
++        # Check grads for non-finite values
++        bad_grad = False
++        for p in self.net.parameters():
++            if p.grad is not None and not torch.isfinite(p.grad).all():
++                bad_grad = True
++                break
++        if bad_grad:
++            try:
++                self._log_warn(f"WARN[BAD_GRAD] non-finite gradients at epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx}")
++            except Exception:
++                pass
++            optimizer.zero_grad(set_to_none=True)
++            self._skip_optimizer_step = False
++            return
++        if getattr(self, "_skip_optimizer_step", False):
++            try:
++                self._log_warn(f"WARN[SKIP] skip optimizer step epoch={getattr(self, 'current_epoch', -1)} batch={batch_idx} ids={getattr(self, '_last_bad_utt_ids', [])[:16]}")
++                bad_path = os.path.join(self.exp_dir, "nan_bad_utt_ids.txt")
++                os.makedirs(self.exp_dir, exist_ok=True)
++                with open(bad_path, "a") as f:
++                    for uid in getattr(self, "_last_bad_utt_ids", []):
++                        f.write(str(uid) + "\n")
++            except Exception:
++                pass
++            optimizer.zero_grad(set_to_none=True)
++            self._skip_optimizer_step = False
++            return
++        # If grad accumulation is enabled via Trainer, rely on base behavior
++        return super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure)
++
+     def on_train_epoch_end(self) -> None:
+         "Lightning hook that is called when a training epoch ends."
+         self.train_loss.reset()

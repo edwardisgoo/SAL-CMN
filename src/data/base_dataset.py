@@ -47,6 +47,18 @@ class BaseDataset(Dataset):
         else:
             raise AttributeError(f'{root} root is not a list or str, {root}')
 
+        # Optional blacklist filtering via env SAL_BLACKLIST_PATH (list of utt_ids per line)
+        bl_path = os.environ.get("SAL_BLACKLIST_PATH", None)
+        if bl_path:
+            try:
+                with open(bl_path, "r") as f:
+                    bad_ids = set([line.strip() for line in f if line.strip()])
+                before = len(sample_list)
+                sample_list = [p for p in sample_list if os.path.splitext(os.path.basename(p))[0] not in bad_ids]
+                print(f"Blacklist filtered: {before} -> {len(sample_list)}")
+            except Exception as e:
+                print(f"Failed to read blacklist at {bl_path}: {e}")
+
         # filter by min length
         if min_input_len is not None:
             sample_length = [self.input_load_fn(f).shape[-1] for f in
