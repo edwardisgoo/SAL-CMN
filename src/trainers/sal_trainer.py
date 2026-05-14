@@ -68,6 +68,11 @@ class SALTrainer(LightningModule):
         self.val_acc = F1Metric()
         self.test_acc = F1Metric()
 
+        # Poisoning prevention flags/state
+        self._skip_optimizer_step: bool = False
+        self._last_bad_utt_ids: list = []
+        self._last_good_weight_layer: torch.Tensor | None = None
+
     def _mixup_batch(
             self,
             batch: Tuple[list, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -185,6 +190,14 @@ class SALTrainer(LightningModule):
                 return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         preds1, preds2 = self.forward(inputs)
+        # Snapshot last good weight_layer to allow recovery if poisoned
+        try:
+            wl = getattr(self.net, "weight_layer", None)
+            if wl is not None and torch.isfinite(wl).all():
+                self._last_good_weight_layer = wl.detach().clone()
+                setattr(self.net, "_trainer_ref", self)
+        except Exception:
+            pass
 
         # Guard 2: check preds for NaN/Inf
         any_bad = False

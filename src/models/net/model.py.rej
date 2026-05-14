@@ -1,0 +1,39 @@
+diff a/src/models/net/model.py b/src/models/net/model.py	(rejected hunks)
+@@ -136,19 +136,34 @@ class BaseSSLModel(nn.Module):
+         x = F.pad(x, (0, 256), mode='constant', value=0)
+         out = self.ssl_encoder.extract_feat(x)
+ 
+-        # Guard: ensure encoder outputs are finite; sanitize instead of raising
++        # Guard: ensure encoder outputs are finite; sanitize and flag
++        nan_flag = False
+         if isinstance(out, list):
+             for i in range(len(out)):
+                 t = out[i]
+                 if not torch.isfinite(t).all():
+-                    print(f"WARN[NAN] SSL encoder non-finite features at layer {i}; replacing with zeros", flush=True)
++                    print(f"WARN[NAN] SSL encoder non-finite features at layer {i}; replaced with zeros", flush=True)
+                     out[i] = torch.where(torch.isfinite(t), t, torch.zeros_like(t))
++                    nan_flag = True
+         else:
+             if not torch.isfinite(out).all():
+-                print("WARN[NAN] SSL encoder non-finite features; replacing with zeros", flush=True)
++                print("WARN[NAN] SSL encoder non-finite features; replaced with zeros", flush=True)
+                 out = torch.where(torch.isfinite(out), out, torch.zeros_like(out))
++                nan_flag = True
+         
+         if hasattr(self, "weight_layer"):
++            # If weight_layer is poisoned, restore from last good snapshot if present
++            if not torch.isfinite(self.weight_layer).all():
++                try:
++                    # restore from trainer snapshot if available
++                    if hasattr(self, "_trainer_ref") and getattr(self, "_trainer_ref") is not None:
++                        snap = getattr(self._trainer_ref, "_last_good_weight_layer", None)
++                        if snap is not None and snap.shape == self.weight_layer.shape:
++                            with torch.no_grad():
++                                self.weight_layer.copy_(snap)
++                            print("WARN[NAN] weight_layer contained NaN; restored last good weights", flush=True)
++                except Exception:
++                    pass
+             out = torch.stack(out, dim=0)
+             out = out * self.weight_layer.view(25, 1, 1, 1)
+             out = out.sum(dim=0)

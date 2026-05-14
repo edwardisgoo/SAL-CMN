@@ -136,7 +136,9 @@ class BaseSSLModel(nn.Module):
         x = F.pad(x, (0, 256), mode='constant', value=0)
         out = self.ssl_encoder.extract_feat(x)
 
-        # Guard: ensure encoder outputs are finite
+        # Guard: ensure encoder outputs are finite, sanitize and flag
+        nan_flag = False
+        
         # Guard: replace non-finite SSL features with zeros
         def _sanitize(t: torch.Tensor) -> torch.Tensor:
             return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
@@ -147,13 +149,26 @@ class BaseSSLModel(nn.Module):
                 if not torch.isfinite(t).all():
                     print(f"WARN[NAN] SSL encoder non-finite features at layer {i}; replaced with zeros", flush=True)
                     t = _sanitize(t)
+                    nan_flag = True
                 new_out.append(t)
             out = new_out
         else:
             if not torch.isfinite(out).all():
                 print("WARN[NAN] SSL encoder non-finite features; replaced with zeros", flush=True)
                 out = _sanitize(out)
+                nan_flag = True
         if hasattr(self, "weight_layer"):
+            # ADD THIS BLOCK
+            if not torch.isfinite(self.weight_layer).all():
+                try:
+                    if hasattr(self, "_trainer_ref") and getattr(self, "_trainer_ref") is not None:
+                        snap = getattr(self._trainer_ref, "_last_good_weight_layer", None)
+                        if snap is not None and snap.shape == self.weight_layer.shape:
+                            with torch.no_grad():
+                                self.weight_layer.copy_(snap)
+                            print("WARN[NAN] weight_layer contained NaN; restored last good weights", flush=True)
+                except Exception:
+                    pass
             out = torch.stack(out, dim=0)
             out = out * self.weight_layer.view(25, 1, 1, 1)
             out = out.sum(dim=0)
