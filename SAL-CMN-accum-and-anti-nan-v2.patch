@@ -1,0 +1,11 @@
+diff --git a/configs/trainer/gpu.yaml b/configs/trainer/gpu.yaml
+index 62e9065..4118f73 100644
+--- a/configs/trainer/gpu.yaml
++++ b/configs/trainer/gpu.yaml
+@@ -4,3 +4,6 @@ defaults:
+ accelerator: gpu
+ devices: 1
+ gradient_clip_val: 1.0
++# Accumulate micro-batches to emulate a larger effective batch size
++# Example: data.batch_size=4 with accumulate_grad_batches=8 -> effective 32
++accumulate_grad_batches: 8
